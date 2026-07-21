@@ -1,0 +1,10 @@
+[
+  {
+    "id": "84888f22-3a7f-44a0-9479-dc8d639226b6",
+    "name": "Rainbow Six Siege by Ubisoft",
+    "virtualAudioDevice": "game",
+    "processMatches": [
+      "RainbowSix.exe"
+    ]
+  }
+]

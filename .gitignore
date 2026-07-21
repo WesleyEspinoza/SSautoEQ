@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# Runtime data generated next to the executable
+logs/
+**/app.log
+**/settings.json
+**/profiles.json
+
+# Keep the sample profile checked in
+!**/profiles.example.json
