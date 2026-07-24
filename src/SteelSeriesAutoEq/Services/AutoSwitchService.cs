@@ -3,9 +3,8 @@ using SteelSeriesAutoEq.Models;
 namespace SteelSeriesAutoEq.Services;
 
 /// <summary>
-/// The heart of the app. Ties together API discovery, foreground detection, profile matching,
-/// and switching. It owns the current connection state and raises <see cref="StateChanged"/>
-/// whenever something the UI cares about changes.
+/// Ties together API discovery, foreground detection, and profile switching.
+/// Raises <see cref="StateChanged"/> whenever something the UI cares about changes.
 /// </summary>
 public sealed class AutoSwitchService : IDisposable
 {
@@ -28,6 +27,7 @@ public sealed class AutoSwitchService : IDisposable
     private DateTime _lastRediscoverAttempt = DateTime.MinValue;
     private CancellationTokenSource? _debounceCts;
     private readonly SemaphoreSlim _rediscoverGate = new(1, 1);
+    private bool _awaitingApiRecovery;
 
     public event Action? StateChanged;
 
@@ -64,23 +64,46 @@ public sealed class AutoSwitchService : IDisposable
     /// </summary>
     public ForegroundAppInfo? LastForegroundApp { get; private set; }
 
+    public AppSettings GetSettings() => _settings;
+
     public void UpdateSettings(AppSettings settings)
     {
         _settings = settings;
         _matcher = new ProfileMatcher(settings.FuzzyMatchThreshold);
         _cache.SaveSettings(settings);
-        RaiseStateChanged();
-    }
 
-    public AppSettings GetSettings() => _settings;
+        if (!settings.AutoSwitchEnabled)
+        {
+            SetStatus("Auto switching disabled");
+        }
+        else if (IsConnected)
+        {
+            SetStatus("Connected");
+        }
+        else
+        {
+            RaiseStateChanged();
+        }
+    }
 
     public void SetAutoSwitchEnabled(bool enabled)
     {
         _settings.AutoSwitchEnabled = enabled;
         _cache.SaveSettings(_settings);
-        Status = enabled ? (IsConnected ? "Connected" : Status) : "Auto switching disabled";
         _logger.Info($"Auto switching {(enabled ? "enabled" : "disabled")}");
-        RaiseStateChanged();
+
+        if (!enabled)
+        {
+            SetStatus("Auto switching disabled");
+        }
+        else if (IsConnected)
+        {
+            SetStatus("Connected");
+        }
+        else
+        {
+            RaiseStateChanged();
+        }
     }
 
     public async Task StartAsync()
@@ -96,32 +119,161 @@ public sealed class AutoSwitchService : IDisposable
 
     public async Task ConnectAndRefreshAsync()
     {
-        Status = "Discovering API...";
-        RaiseStateChanged();
+        SetStatus("Discovering API...");
 
         var uri = await DiscoverOrLaunchAsync();
         if (uri is null)
         {
-            _api.Clear();
-            ApiEndpoint = "—";
-            Status = "SteelSeries GG not found";
-            RaiseStateChanged();
+            MarkDisconnected();
             return;
         }
 
-        _api.SetBaseUri(uri);
-        ApiEndpoint = uri.ToString().TrimEnd('/');
-        await RefreshProfilesAsync();
-        await RefreshSelectedProfileAsync();
+        await ApplyEndpointAsync(uri);
+    }
 
-        Status = "Connected";
-        RaiseStateChanged();
+    public async Task RefreshProfilesAsync()
+    {
+        if (!_api.IsConnected)
+        {
+            await ConnectAndRefreshAsync();
+            return;
+        }
+
+        try
+        {
+            var apiProfiles = await _api.GetGameProfilesAsync();
+            Profiles = _cache.MergeAndSave(apiProfiles);
+            _logger.Info($"Loaded {Profiles.Count} game EQ profile(s).");
+            SetStatus("Connected");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Failed to refresh profiles.", ex);
+            SetStatus("API unavailable");
+            await TryRediscoverAsync(force: true);
+        }
+    }
+
+    public SonarProfile? ResolveDefaultProfile()
+    {
+        if (string.IsNullOrWhiteSpace(_settings.DefaultProfileId))
+        {
+            return null;
+        }
+
+        return FindProfile(_settings.DefaultProfileId);
+    }
+
+    /// <summary>Config id explicitly assigned to an executable, if any.</summary>
+    public string? GetAssignedProfileId(string executableName)
+    {
+        if (string.IsNullOrWhiteSpace(executableName))
+        {
+            return null;
+        }
+
+        foreach (var kv in _settings.ProcessProfileMap)
+        {
+            if (kv.Key.Equals(executableName, StringComparison.OrdinalIgnoreCase))
+            {
+                return kv.Value;
+            }
+        }
+
+        return null;
+    }
+
+    public SonarProfile? GetAssignedProfile(string executableName)
+    {
+        var id = GetAssignedProfileId(executableName);
+        return string.IsNullOrWhiteSpace(id) ? null : FindProfile(id);
+    }
+
+    /// <summary>Non-switching suggestion used only to pre-fill the assignment UI.</summary>
+    public SonarProfile? SuggestProfile(ForegroundAppInfo app) =>
+        _matcher.FindBestMatch(app, Profiles)?.Profile;
+
+    public IReadOnlyList<(string Executable, string ProfileName, string ConfigId)> GetAssignments()
+    {
+        return _settings.ProcessProfileMap
+            .Select(kv => (
+                Executable: kv.Key,
+                ProfileName: FindProfile(kv.Value)?.Name ?? "(missing profile)",
+                ConfigId: kv.Value))
+            .OrderBy(r => r.Executable, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     /// <summary>
-    /// Runs discovery and, if the API isn't found, auto-starts SteelSeries GG and waits for it
-    /// to come up. If GG is already running but the API isn't answering yet (still booting),
-    /// it simply waits and keeps probing.
+    /// Assigns (or with null configId, clears) the config for an executable. If that process
+    /// is currently focused, applies the change immediately.
+    /// </summary>
+    public async Task AssignProfileToProcessAsync(string executableName, string? configId)
+    {
+        var exe = executableName?.Trim();
+        if (string.IsNullOrWhiteSpace(exe))
+        {
+            return;
+        }
+
+        var existingKey = _settings.ProcessProfileMap.Keys
+            .FirstOrDefault(k => k.Equals(exe, StringComparison.OrdinalIgnoreCase));
+        if (existingKey is not null)
+        {
+            _settings.ProcessProfileMap.Remove(existingKey);
+        }
+
+        if (!string.IsNullOrWhiteSpace(configId))
+        {
+            _settings.ProcessProfileMap[exe.ToLowerInvariant()] = configId;
+            _logger.Info($"Assigned '{exe}' → {FindProfile(configId)?.Name ?? configId}");
+        }
+        else
+        {
+            _logger.Info($"Cleared assignment for '{exe}' (will use default)");
+        }
+
+        _cache.SaveSettings(_settings);
+
+        var current = LastForegroundApp;
+        if (current is not null &&
+            current.ExecutableName.Equals(exe, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastLoggedProcessKey = null;
+            var target = ResolveProfileForApp(current, out _);
+            if (target is not null)
+            {
+                await SwitchToProfileAsync(target, CancellationToken.None);
+            }
+        }
+
+        RaiseStateChanged();
+    }
+
+    public void Dispose()
+    {
+        _foreground.ForegroundChanged -= OnForegroundChanged;
+        _foreground.Dispose();
+        _debounceCts?.Cancel();
+        _debounceCts?.Dispose();
+
+        _healthCts?.Cancel();
+        try
+        {
+            _healthTask?.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // ignored
+        }
+
+        _healthCts?.Dispose();
+        _rediscoverGate.Dispose();
+        _api.Dispose();
+    }
+
+    /// <summary>
+    /// Runs discovery and, if needed, auto-starts SteelSeries GG and waits for the API.
     /// </summary>
     private async Task<Uri?> DiscoverOrLaunchAsync()
     {
@@ -137,8 +289,7 @@ public sealed class AutoSwitchService : IDisposable
         }
         else
         {
-            Status = "Starting SteelSeries GG...";
-            RaiseStateChanged();
+            SetStatus("Starting SteelSeries GG...");
             if (!_launcher.TryLaunch())
             {
                 return null;
@@ -148,14 +299,9 @@ public sealed class AutoSwitchService : IDisposable
         return await WaitForApiAsync();
     }
 
-    /// <summary>
-    /// Polls discovery until the Sonar API responds or a timeout elapses. Used after launching
-    /// (or while waiting on) SteelSeries GG, which can take several seconds to expose its API.
-    /// </summary>
     private async Task<Uri?> WaitForApiAsync()
     {
-        Status = "Waiting for SteelSeries GG...";
-        RaiseStateChanged();
+        SetStatus("Waiting for SteelSeries GG...");
 
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (DateTime.UtcNow < deadline)
@@ -174,34 +320,33 @@ public sealed class AutoSwitchService : IDisposable
         return null;
     }
 
-    public async Task RefreshProfilesAsync()
+    private async Task ApplyEndpointAsync(Uri uri)
     {
-        if (!_api.IsConnected)
-        {
-            await ConnectAndRefreshAsync();
-            return;
-        }
+        _api.SetBaseUri(uri);
+        ApiEndpoint = uri.ToString().TrimEnd('/');
+        await RefreshProfilesAsync();
+        await RefreshSelectedProfileAsync();
+        _consecutivePingFailures = 0;
+        _awaitingApiRecovery = false;
+        SetStatus("Connected");
+    }
 
-        try
-        {
-            var apiProfiles = await _api.GetGameProfilesAsync();
-            Profiles = _cache.MergeWithCache(apiProfiles);
-            _cache.SaveProfiles(Profiles);
-            _logger.Info($"Loaded {Profiles.Count} game EQ profile(s).");
-            Status = "Connected";
-            RaiseStateChanged();
-        }
-        catch (Exception ex)
-        {
-            _logger.Error("Failed to refresh profiles.", ex);
-            Status = "API unavailable";
-            await TryRediscoverAsync(force: true);
-        }
+    private void MarkDisconnected()
+    {
+        _api.Clear();
+        ApiEndpoint = "—";
+        _awaitingApiRecovery = false;
+        SetStatus("SteelSeries GG not found");
+    }
+
+    private void SetStatus(string status)
+    {
+        Status = status;
+        RaiseStateChanged();
     }
 
     private void OnForegroundChanged(ForegroundAppInfo app)
     {
-        // Debounce rapid focus flicker (alt-tab animations, etc.).
         _debounceCts?.Cancel();
         _debounceCts = new CancellationTokenSource();
         var token = _debounceCts.Token;
@@ -253,7 +398,6 @@ public sealed class AutoSwitchService : IDisposable
         {
             Interlocked.Exchange(ref _switchGate, 0);
 
-            // If something arrived in the tiny window after clearing pending but before unlocking, pick it up.
             var late = Interlocked.Exchange(ref _pendingApp, null);
             if (late is not null)
             {
@@ -270,10 +414,7 @@ public sealed class AutoSwitchService : IDisposable
             return;
         }
 
-        // Ignore our own window and the shell so the "current process" stays the game
-        // even while the user is interacting with the Auto EQ window.
-        if (string.IsNullOrWhiteSpace(app.ExecutableName) ||
-            IsSelfOrShell(app))
+        if (string.IsNullOrWhiteSpace(app.ExecutableName) || IsSelfOrShell(app))
         {
             return;
         }
@@ -321,9 +462,6 @@ public sealed class AutoSwitchService : IDisposable
         await SwitchToProfileAsync(target, cancellationToken);
     }
 
-    /// <summary>
-    /// Resolves the profile for a process: explicit per-process assignment first, then default.
-    /// </summary>
     private SonarProfile? ResolveProfileForApp(ForegroundAppInfo app, out string reason)
     {
         var assigned = GetAssignedProfile(app.ExecutableName);
@@ -344,116 +482,8 @@ public sealed class AutoSwitchService : IDisposable
         return null;
     }
 
-    public SonarProfile? ResolveDefaultProfile()
-    {
-        if (string.IsNullOrWhiteSpace(_settings.DefaultProfileId))
-        {
-            return null;
-        }
-
-        return Profiles.FirstOrDefault(p =>
-            p.Id.Equals(_settings.DefaultProfileId, StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>Config id explicitly assigned to an executable, if any.</summary>
-    public string? GetAssignedProfileId(string executableName)
-    {
-        if (string.IsNullOrWhiteSpace(executableName))
-        {
-            return null;
-        }
-
-        foreach (var kv in _settings.ProcessProfileMap)
-        {
-            if (kv.Key.Equals(executableName, StringComparison.OrdinalIgnoreCase))
-            {
-                return kv.Value;
-            }
-        }
-
-        return null;
-    }
-
-    public SonarProfile? GetAssignedProfile(string executableName)
-    {
-        var id = GetAssignedProfileId(executableName);
-        if (string.IsNullOrWhiteSpace(id))
-        {
-            return null;
-        }
-
-        return Profiles.FirstOrDefault(p => p.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>Non-switching suggestion used only to pre-fill the assignment UI.</summary>
-    public SonarProfile? SuggestProfile(ForegroundAppInfo app) =>
-        _matcher.FindBestMatch(app, Profiles)?.Profile;
-
-    public IReadOnlyList<(string Executable, string ProfileName, string ConfigId)> GetAssignments()
-    {
-        var result = new List<(string, string, string)>();
-        foreach (var kv in _settings.ProcessProfileMap)
-        {
-            var name = Profiles.FirstOrDefault(p =>
-                p.Id.Equals(kv.Value, StringComparison.OrdinalIgnoreCase))?.Name
-                ?? "(missing profile)";
-            result.Add((kv.Key, name, kv.Value));
-        }
-
-        return result
-            .OrderBy(r => r.Item1, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    /// <summary>
-    /// Assigns (or with null configId, clears) the config for an executable. If that process
-    /// is currently focused, applies the change immediately.
-    /// </summary>
-    public async Task AssignProfileToProcessAsync(string executableName, string? configId)
-    {
-        var exe = executableName?.Trim();
-        if (string.IsNullOrWhiteSpace(exe))
-        {
-            return;
-        }
-
-        // Remove any existing (case-insensitive) key first.
-        var existingKey = _settings.ProcessProfileMap.Keys
-            .FirstOrDefault(k => k.Equals(exe, StringComparison.OrdinalIgnoreCase));
-        if (existingKey is not null)
-        {
-            _settings.ProcessProfileMap.Remove(existingKey);
-        }
-
-        if (!string.IsNullOrWhiteSpace(configId))
-        {
-            _settings.ProcessProfileMap[exe.ToLowerInvariant()] = configId;
-            var name = Profiles.FirstOrDefault(p =>
-                p.Id.Equals(configId, StringComparison.OrdinalIgnoreCase))?.Name ?? configId;
-            _logger.Info($"Assigned '{exe}' → {name}");
-        }
-        else
-        {
-            _logger.Info($"Cleared assignment for '{exe}' (will use default)");
-        }
-
-        _cache.SaveSettings(_settings);
-
-        // Apply immediately if the assigned process is the one currently in focus.
-        var current = LastForegroundApp;
-        if (current is not null &&
-            current.ExecutableName.Equals(exe, StringComparison.OrdinalIgnoreCase))
-        {
-            _lastLoggedProcessKey = null;
-            var target = ResolveProfileForApp(current, out _);
-            if (target is not null)
-            {
-                await SwitchToProfileAsync(target, CancellationToken.None);
-            }
-        }
-
-        RaiseStateChanged();
-    }
+    private SonarProfile? FindProfile(string id) =>
+        Profiles.FirstOrDefault(p => p.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
 
     private async Task SwitchToProfileAsync(SonarProfile profile, CancellationToken cancellationToken)
     {
@@ -470,23 +500,18 @@ public sealed class AutoSwitchService : IDisposable
             var selected = await _api.GetSelectedGameProfileAsync(cancellationToken);
             CurrentProfile = selected?.Name ?? profile.Name;
             _lastSwitchedProfileId = profile.Id;
-            Status = "Connected";
-            RaiseStateChanged();
+            SetStatus("Connected");
         }
         catch (Exception ex)
         {
             _logger.Error($"Failed to switch profile '{profile.Name}'.", ex);
-            // Don't thrash rediscovery on a single failed switch — verify with a ping first.
             if (!await _api.PingAsync(CancellationToken.None))
             {
-                Status = "API unavailable — rediscovering...";
-                RaiseStateChanged();
-                await TryRediscoverAsync(force: true);
+                await BeginRediscoveryAsync();
             }
             else
             {
-                Status = "Connected";
-                RaiseStateChanged();
+                SetStatus("Connected");
             }
         }
     }
@@ -502,20 +527,17 @@ public sealed class AutoSwitchService : IDisposable
                 if (!_api.IsConnected)
                 {
                     _logger.Warn("Health check: not connected — rediscovering.");
-                    Status = "API unavailable — rediscovering...";
-                    RaiseStateChanged();
-                    await TryRediscoverAsync(force: true);
+                    await BeginRediscoveryAsync();
                     continue;
                 }
 
                 if (await _api.PingAsync(cancellationToken))
                 {
                     _consecutivePingFailures = 0;
-                    if (Status.Contains("unavailable", StringComparison.OrdinalIgnoreCase) ||
-                        Status.Contains("rediscover", StringComparison.OrdinalIgnoreCase))
+                    if (_awaitingApiRecovery)
                     {
-                        Status = "Connected";
-                        RaiseStateChanged();
+                        _awaitingApiRecovery = false;
+                        SetStatus("Connected");
                     }
 
                     continue;
@@ -524,15 +546,12 @@ public sealed class AutoSwitchService : IDisposable
                 _consecutivePingFailures++;
                 _logger.Warn($"Health check ping failed ({_consecutivePingFailures}/3).");
 
-                // Require a few failures so a single slow Sonar response doesn't flap status.
                 if (_consecutivePingFailures < 3)
                 {
                     continue;
                 }
 
-                Status = "API unavailable — rediscovering...";
-                RaiseStateChanged();
-                await TryRediscoverAsync(force: true);
+                await BeginRediscoveryAsync();
                 _consecutivePingFailures = 0;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -544,6 +563,13 @@ public sealed class AutoSwitchService : IDisposable
                 _logger.Error("Health check error.", ex);
             }
         }
+    }
+
+    private async Task BeginRediscoveryAsync()
+    {
+        _awaitingApiRecovery = true;
+        SetStatus("API unavailable — rediscovering...");
+        await TryRediscoverAsync(force: true);
     }
 
     private async Task RefreshSelectedProfileAsync()
@@ -579,38 +605,27 @@ public sealed class AutoSwitchService : IDisposable
         {
             _lastRediscoverAttempt = DateTime.UtcNow;
 
-            // Keep the old endpoint until a new one is confirmed — avoids blanking IsConnected mid-flight.
             var previous = _api.BaseUri;
             if (previous is not null && await _discovery.IsValidSonarApiAsync(previous))
             {
                 _logger.Info($"Existing Sonar endpoint still valid: {previous}");
                 _api.SetBaseUri(previous);
-                Status = "Connected";
                 _consecutivePingFailures = 0;
-                RaiseStateChanged();
+                _awaitingApiRecovery = false;
+                SetStatus("Connected");
                 return;
             }
 
-            Status = "Discovering API...";
-            RaiseStateChanged();
+            SetStatus("Discovering API...");
 
             var uri = await DiscoverOrLaunchAsync();
             if (uri is null)
             {
-                _api.Clear();
-                ApiEndpoint = "—";
-                Status = "SteelSeries GG not found";
-                RaiseStateChanged();
+                MarkDisconnected();
                 return;
             }
 
-            _api.SetBaseUri(uri);
-            ApiEndpoint = uri.ToString().TrimEnd('/');
-            await RefreshProfilesAsync();
-            await RefreshSelectedProfileAsync();
-            _consecutivePingFailures = 0;
-            Status = "Connected";
-            RaiseStateChanged();
+            await ApplyEndpointAsync(uri);
         }
         finally
         {
@@ -629,26 +644,4 @@ public sealed class AutoSwitchService : IDisposable
     }
 
     private void RaiseStateChanged() => StateChanged?.Invoke();
-
-    public void Dispose()
-    {
-        _foreground.ForegroundChanged -= OnForegroundChanged;
-        _foreground.Stop();
-        _debounceCts?.Cancel();
-        _debounceCts?.Dispose();
-
-        _healthCts?.Cancel();
-        try
-        {
-            _healthTask?.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch
-        {
-            // ignored
-        }
-
-        _healthCts?.Dispose();
-        _rediscoverGate.Dispose();
-        _api.Dispose();
-    }
 }

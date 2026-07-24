@@ -127,10 +127,6 @@ These are created next to the executable on first run and are safe to delete:
 - Steam AppID based mapping
 - Optional per-title volume presets
 
-## Contributing
-
-Issues and pull requests are welcome. The project targets .NET 8 and WPF; keep changes buildable with `dotnet build` and avoid adding hardcoded ports or paths.
-
 ## License
 
 Released under the [MIT License](LICENSE).

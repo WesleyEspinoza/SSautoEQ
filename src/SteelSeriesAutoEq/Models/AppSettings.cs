@@ -7,9 +7,6 @@ public sealed class AppSettings
 {
     public bool AutoSwitchEnabled { get; set; } = true;
 
-    /// <summary>Kept for the suggestion helper; the app is event-driven and does not poll to switch.</summary>
-    public int PollIntervalMs { get; set; } = 1500;
-
     /// <summary>Minimum bigram-similarity score (0-1) before a fuzzy suggestion is offered.</summary>
     public double FuzzyMatchThreshold { get; set; } = 0.72;
 

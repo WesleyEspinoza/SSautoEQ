@@ -12,13 +12,6 @@ namespace SteelSeriesAutoEq.Services;
 /// </summary>
 public sealed class ApiDiscoveryService
 {
-    private static readonly string[] ProcessNames =
-    [
-        "SteelSeriesGG",
-        "SteelSeriesSonar",
-        "SteelSeriesGGClient"
-    ];
-
     private static readonly int[] CommonPorts =
     [
         57864, 58000, 58001, 58002, 58003, 59000, 59001,
@@ -179,21 +172,26 @@ public sealed class ApiDiscoveryService
 
     private IEnumerable<int> DiscoverViaProcessConnections()
     {
-        var steelSeriesPids = Process.GetProcesses()
-            .Where(p =>
+        var steelSeriesPids = new HashSet<int>();
+        foreach (var process in Process.GetProcesses())
+        {
+            try
             {
-                try
+                if (SteelSeriesHosts.ProcessNames.Any(n =>
+                        process.ProcessName.Equals(n, StringComparison.OrdinalIgnoreCase)))
                 {
-                    return ProcessNames.Any(n =>
-                        p.ProcessName.Equals(n, StringComparison.OrdinalIgnoreCase));
+                    steelSeriesPids.Add(process.Id);
                 }
-                catch
-                {
-                    return false;
-                }
-            })
-            .Select(p => p.Id)
-            .ToHashSet();
+            }
+            catch
+            {
+                // Access denied / exited — skip.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
 
         if (steelSeriesPids.Count == 0)
         {

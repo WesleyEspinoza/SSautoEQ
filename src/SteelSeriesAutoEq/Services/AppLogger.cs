@@ -1,20 +1,12 @@
-using System.Collections.Concurrent;
-
 namespace SteelSeriesAutoEq.Services;
 
 /// <summary>
-/// Simple append-only logger. Writes timestamped lines to logs/app.log and keeps the most
-/// recent lines in memory so the UI can show a tail without re-reading the file.
+/// Append-only logger. Writes timestamped lines to logs/app.log.
 /// </summary>
 public sealed class AppLogger
 {
-    private const int MaxRecentLines = 200;
-
     private readonly string _logPath;
     private readonly object _sync = new();
-    private readonly ConcurrentQueue<string> _recent = new();
-
-    public event Action<string>? LineWritten;
 
     public AppLogger(string? baseDirectory = null)
     {
@@ -25,11 +17,6 @@ public sealed class AppLogger
     }
 
     public string LogPath => _logPath;
-
-    public IReadOnlyList<string> GetRecentLines(int count = 50)
-    {
-        return _recent.Reverse().Take(count).Reverse().ToList();
-    }
 
     public void Info(string message) => Write("INFO", message);
 
@@ -68,16 +55,6 @@ public sealed class AppLogger
         lock (_sync)
         {
             File.AppendAllText(_logPath, text);
-        }
-
-        foreach (var line in text.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
-        {
-            _recent.Enqueue(line);
-            while (_recent.Count > MaxRecentLines && _recent.TryDequeue(out _))
-            {
-            }
-
-            LineWritten?.Invoke(line);
         }
     }
 }

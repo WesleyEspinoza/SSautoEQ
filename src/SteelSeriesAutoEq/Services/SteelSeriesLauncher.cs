@@ -10,13 +10,6 @@ namespace SteelSeriesAutoEq.Services;
 /// </summary>
 public sealed class SteelSeriesLauncher
 {
-    private static readonly string[] ProcessNames =
-    [
-        "SteelSeriesGG",
-        "SteelSeriesSonar",
-        "SteelSeriesGGClient"
-    ];
-
     // Where GG usually lives, relative to the various Program Files roots.
     private static readonly string[] RelativeInstallPaths =
     [
@@ -35,18 +28,31 @@ public sealed class SteelSeriesLauncher
     /// <summary>True when a SteelSeries GG / Sonar host process is currently running.</summary>
     public bool IsRunning()
     {
-        foreach (var name in ProcessNames)
+        foreach (var name in SteelSeriesHosts.ProcessNames)
         {
+            Process[] processes;
             try
             {
-                if (Process.GetProcessesByName(name).Length > 0)
+                processes = Process.GetProcessesByName(name);
+            }
+            catch
+            {
+                continue;
+            }
+
+            try
+            {
+                if (processes.Length > 0)
                 {
                     return true;
                 }
             }
-            catch
+            finally
             {
-                // Ignore access errors and keep checking the rest.
+                foreach (var process in processes)
+                {
+                    process.Dispose();
+                }
             }
         }
 

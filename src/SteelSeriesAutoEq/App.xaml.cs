@@ -1,4 +1,5 @@
-﻿using System.Windows;
+﻿using System.Runtime.InteropServices;
+using System.Windows;
 using SteelSeriesAutoEq.Services;
 using SteelSeriesAutoEq.Tray;
 
@@ -10,6 +11,9 @@ namespace SteelSeriesAutoEq;
 /// </summary>
 public partial class App : Application
 {
+    // Windows toast attribution (the small icon + name in the notification header) keys off this.
+    private const string AppUserModelId = "SteelSeriesAutoEq.Tray";
+
     private SingleInstanceGuard? _singleInstance;
     private AppLogger? _logger;
     private AutoSwitchService? _service;
@@ -17,6 +21,9 @@ public partial class App : Application
 
     protected override async void OnStartup(StartupEventArgs e)
     {
+        // Must run before any windows or tray balloons so toasts pick up our exe icon.
+        _ = SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+
         base.OnStartup(e);
 
         // If another copy is already running, hand off to it and quit quietly.
@@ -69,4 +76,7 @@ public partial class App : Application
         _singleInstance?.Dispose();
         base.OnExit(e);
     }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
 }

@@ -6,16 +6,23 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <ApplicationIcon />
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <AssemblyName>SteelSeriesAutoEq</AssemblyName>
     <RootNamespace>SteelSeriesAutoEq</RootNamespace>
     <Version>0.1.0</Version>
+    <Product>SteelSeries Auto EQ</Product>
+    <AssemblyTitle>SteelSeries Auto EQ</AssemblyTitle>
     <Description>Automatically switches SteelSeries GG Sonar EQ profiles based on the active game.</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embedded for the window/tray; ApplicationIcon above also stamps the .exe. -->
+    <Resource Include="Assets\icon.ico" />
   </ItemGroup>
 
 </Project>

@@ -5,29 +5,25 @@ using SteelSeriesAutoEq.Services;
 namespace SteelSeriesAutoEq;
 
 /// <summary>
-/// The status and configuration window. Reads everything it displays from the service and
-/// re-reads on <see cref="AutoSwitchService.StateChanged"/>, so it always reflects live state.
+/// Status and configuration window. Reads display state from the service and refreshes on
+/// <see cref="AutoSwitchService.StateChanged"/>.
 /// </summary>
 public partial class SettingsWindow : Window
 {
     private readonly AutoSwitchService _service;
-    private readonly AppLogger _logger;
     private string? _focusExecutable;
 
-    public SettingsWindow(AutoSwitchService service, AppLogger logger)
+    public SettingsWindow(AutoSwitchService service)
     {
         InitializeComponent();
+        Icon = AppIcons.CreateImageSource();
         _service = service;
-        _logger = logger;
         LoadFromService();
         _service.StateChanged += OnStateChanged;
         Closed += (_, _) => _service.StateChanged -= OnStateChanged;
     }
 
-    private void OnStateChanged()
-    {
-        Dispatcher.Invoke(LoadFromService);
-    }
+    private void OnStateChanged() => Dispatcher.Invoke(LoadFromService);
 
     private void LoadFromService()
     {
@@ -42,19 +38,9 @@ public partial class SettingsWindow : Window
             $"{_service.Status}  |  API: {_service.ApiEndpoint}{Environment.NewLine}" +
             $"Default: {defaultName}  |  Profiles: {_service.Profiles.Count}";
 
-        // Default profile combo
-        var defaultItems = new List<ProfileChoice>
-        {
-            new("(none — leave current)", null)
-        };
-        defaultItems.AddRange(_service.Profiles
-            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(p => new ProfileChoice(p.Name, p.Id)));
-
+        var defaultItems = BuildProfileChoices("(none — leave current)");
         DefaultProfileCombo.ItemsSource = defaultItems;
-        DefaultProfileCombo.SelectedItem = defaultItems.FirstOrDefault(c =>
-            string.Equals(c.Id, settings.DefaultProfileId, StringComparison.OrdinalIgnoreCase))
-            ?? defaultItems[0];
+        DefaultProfileCombo.SelectedItem = FindChoice(defaultItems, settings.DefaultProfileId);
 
         LoadFocusPanel();
         LoadAssignments();
@@ -65,13 +51,7 @@ public partial class SettingsWindow : Window
         var app = _service.LastForegroundApp;
         _focusExecutable = app?.ExecutableName;
 
-        var assignItems = new List<ProfileChoice>
-        {
-            new("(use default)", null)
-        };
-        assignItems.AddRange(_service.Profiles
-            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(p => new ProfileChoice(p.Name, p.Id)));
+        var assignItems = BuildProfileChoices("(use default)");
         AssignProfileCombo.ItemsSource = assignItems;
 
         if (app is null || string.IsNullOrWhiteSpace(app.ExecutableName))
@@ -91,21 +71,15 @@ public partial class SettingsWindow : Window
             ? string.Empty
             : $"“{app.WindowTitle}”";
 
-        // Pre-select: existing assignment → suggestion → (use default)
         var assignedId = _service.GetAssignedProfileId(app.ExecutableName);
         if (!string.IsNullOrWhiteSpace(assignedId))
         {
-            AssignProfileCombo.SelectedItem = assignItems.FirstOrDefault(c =>
-                string.Equals(c.Id, assignedId, StringComparison.OrdinalIgnoreCase)) ?? assignItems[0];
+            AssignProfileCombo.SelectedItem = FindChoice(assignItems, assignedId);
+            return;
         }
-        else
-        {
-            var suggestion = _service.SuggestProfile(app);
-            AssignProfileCombo.SelectedItem = suggestion is null
-                ? assignItems[0]
-                : assignItems.FirstOrDefault(c =>
-                    string.Equals(c.Id, suggestion.Id, StringComparison.OrdinalIgnoreCase)) ?? assignItems[0];
-        }
+
+        var suggestion = _service.SuggestProfile(app);
+        AssignProfileCombo.SelectedItem = FindChoice(assignItems, suggestion?.Id);
     }
 
     private void LoadAssignments()
@@ -114,6 +88,19 @@ public partial class SettingsWindow : Window
             .Select(a => new AssignmentRow(a.Executable, a.ProfileName, a.ConfigId))
             .ToList();
     }
+
+    private List<ProfileChoice> BuildProfileChoices(string noneLabel)
+    {
+        var items = new List<ProfileChoice> { new(noneLabel, null) };
+        items.AddRange(_service.Profiles
+            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(p => new ProfileChoice(p.Name, p.Id)));
+        return items;
+    }
+
+    private static ProfileChoice FindChoice(IReadOnlyList<ProfileChoice> items, string? id) =>
+        items.FirstOrDefault(c => string.Equals(c.Id, id, StringComparison.OrdinalIgnoreCase))
+        ?? items[0];
 
     private async void Assign_Click(object sender, RoutedEventArgs e)
     {
@@ -151,19 +138,16 @@ public partial class SettingsWindow : Window
         var selectedDefault = DefaultProfileCombo.SelectedItem as ProfileChoice;
         var current = _service.GetSettings();
 
-        var settings = new AppSettings
+        _service.UpdateSettings(new AppSettings
         {
             AutoSwitchEnabled = AutoSwitchCheck.IsChecked == true,
-            PollIntervalMs = current.PollIntervalMs,
             FuzzyMatchThreshold = current.FuzzyMatchThreshold,
             DefaultProfileId = string.IsNullOrWhiteSpace(selectedDefault?.Id)
                 ? null
                 : selectedDefault.Id,
             ProcessProfileMap = current.ProcessProfileMap
-        };
+        });
 
-        _service.UpdateSettings(settings);
-        _service.SetAutoSwitchEnabled(settings.AutoSwitchEnabled);
         LoadFromService();
     }
 

@@ -4,9 +4,8 @@ using SteelSeriesAutoEq.Models;
 namespace SteelSeriesAutoEq.Services;
 
 /// <summary>
-/// Reads and writes the on-disk state (settings.json and profiles.json). The profile cache
-/// lets the app show something immediately at startup before Sonar has been queried, and it
-/// preserves any manual per-profile overrides across refreshes.
+/// Reads and writes on-disk state (settings.json and profiles.json). The profile cache
+/// shows something immediately at startup and preserves manual per-profile overrides.
 /// </summary>
 public sealed class ProfileCacheService
 {
@@ -28,8 +27,6 @@ public sealed class ProfileCacheService
         _settingsPath = Path.Combine(root, "settings.json");
     }
 
-    public string ProfilesPath => _profilesPath;
-
     public IReadOnlyList<SonarProfile> LoadProfiles()
     {
         if (!File.Exists(_profilesPath))
@@ -40,8 +37,7 @@ public sealed class ProfileCacheService
         try
         {
             var json = File.ReadAllText(_profilesPath);
-            var profiles = JsonSerializer.Deserialize<List<SonarProfile>>(json, JsonOptions);
-            return profiles ?? [];
+            return JsonSerializer.Deserialize<List<SonarProfile>>(json, JsonOptions) ?? [];
         }
         catch (Exception ex)
         {
@@ -50,12 +46,15 @@ public sealed class ProfileCacheService
         }
     }
 
-    public void SaveProfiles(IEnumerable<SonarProfile> profiles)
+    /// <summary>
+    /// Merges API profiles with any cached processMatches overrides, writes profiles.json,
+    /// and returns the merged list.
+    /// </summary>
+    public IReadOnlyList<SonarProfile> MergeAndSave(IEnumerable<SonarProfile> apiProfiles)
     {
         var existing = LoadProfiles().ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
 
-        // Carry any manual processMatches from the cached copy onto the fresh API data.
-        var merged = profiles.Select(p =>
+        var merged = apiProfiles.Select(p =>
         {
             if (existing.TryGetValue(p.Id, out var prior) && prior.ProcessMatches.Count > 0)
             {
@@ -65,19 +64,23 @@ public sealed class ProfileCacheService
             return p;
         }).ToList();
 
-        // Keep hand-edited entries that no longer come back from the API so we don't lose overrides.
+        // Keep hand-edited entries that no longer come back from the API.
         foreach (var prior in existing.Values)
         {
-            if (merged.All(p => !p.Id.Equals(prior.Id, StringComparison.OrdinalIgnoreCase)) &&
-                prior.ProcessMatches.Count > 0)
+            if (prior.ProcessMatches.Count == 0)
+            {
+                continue;
+            }
+
+            if (merged.All(p => !p.Id.Equals(prior.Id, StringComparison.OrdinalIgnoreCase)))
             {
                 merged.Add(prior);
             }
         }
 
-        var json = JsonSerializer.Serialize(merged, JsonOptions);
-        File.WriteAllText(_profilesPath, json);
+        File.WriteAllText(_profilesPath, JsonSerializer.Serialize(merged, JsonOptions));
         _logger.Info($"Cached {merged.Count} profile(s) to profiles.json");
+        return merged;
     }
 
     public AppSettings LoadSettings()
@@ -101,24 +104,6 @@ public sealed class ProfileCacheService
 
     public void SaveSettings(AppSettings settings)
     {
-        var json = JsonSerializer.Serialize(settings, JsonOptions);
-        File.WriteAllText(_settingsPath, json);
-    }
-
-    /// <summary>
-    /// Applies cached processMatches overrides onto a freshly fetched set of API profiles.
-    /// </summary>
-    public IReadOnlyList<SonarProfile> MergeWithCache(IReadOnlyList<SonarProfile> apiProfiles)
-    {
-        var cached = LoadProfiles().ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
-        foreach (var profile in apiProfiles)
-        {
-            if (cached.TryGetValue(profile.Id, out var prior))
-            {
-                profile.ProcessMatches = prior.ProcessMatches;
-            }
-        }
-
-        return apiProfiles;
+        File.WriteAllText(_settingsPath, JsonSerializer.Serialize(settings, JsonOptions));
     }
 }

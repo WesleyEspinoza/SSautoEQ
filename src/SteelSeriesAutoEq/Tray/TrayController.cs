@@ -26,10 +26,10 @@ public sealed class TrayController : IDisposable
         _service = service;
         _logger = logger;
 
-        _gameItem = new MenuItem { Header = "Current Game: —", IsEnabled = false };
-        _profileItem = new MenuItem { Header = "Current Profile: —", IsEnabled = false };
-        _statusItem = new MenuItem { Header = "Status: Starting...", IsEnabled = false };
-        _endpointItem = new MenuItem { Header = "API: —", IsEnabled = false };
+        _gameItem = DisabledItem("Current Game: —");
+        _profileItem = DisabledItem("Current Profile: —");
+        _statusItem = DisabledItem("Status: Starting...");
+        _endpointItem = DisabledItem("API: —");
         _autoSwitchItem = new MenuItem
         {
             Header = "Enable Auto Switching",
@@ -54,45 +54,26 @@ public sealed class TrayController : IDisposable
             }
         };
 
-        var showWindowItem = new MenuItem { Header = "Show Window" };
-        showWindowItem.Click += (_, _) => OpenSettings();
-
-        var settingsItem = new MenuItem { Header = "Settings" };
-        settingsItem.Click += (_, _) => OpenSettings();
+        var openItem = new MenuItem { Header = "Open" };
+        openItem.Click += (_, _) => OpenSettings();
 
         var openLogItem = new MenuItem { Header = "Open Log" };
-        openLogItem.Click += (_, _) =>
-        {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = _logger.LogPath,
-                    UseShellExecute = true
-                });
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Could not open log:{Environment.NewLine}{ex.Message}",
-                    "SteelSeries Auto EQ", MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
-        };
+        openLogItem.Click += (_, _) => OpenLog();
 
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current.Shutdown();
 
         var menu = new ContextMenu();
-        menu.Items.Add(new MenuItem { Header = "SteelSeries Auto EQ", IsEnabled = false });
+        menu.Items.Add(DisabledItem("SteelSeries Auto EQ"));
         menu.Items.Add(new Separator());
         menu.Items.Add(_gameItem);
         menu.Items.Add(_profileItem);
         menu.Items.Add(_statusItem);
         menu.Items.Add(_endpointItem);
         menu.Items.Add(new Separator());
-        menu.Items.Add(showWindowItem);
+        menu.Items.Add(openItem);
         menu.Items.Add(refreshItem);
         menu.Items.Add(_autoSwitchItem);
-        menu.Items.Add(settingsItem);
         menu.Items.Add(openLogItem);
         menu.Items.Add(new Separator());
         menu.Items.Add(exitItem);
@@ -100,7 +81,8 @@ public sealed class TrayController : IDisposable
         _tray = new TaskbarIcon
         {
             ToolTipText = "SteelSeries Auto EQ — double-click to open",
-            Icon = TrayIconFactory.CreateIcon(),
+            IconSource = AppIcons.CreateImageSource(),
+            Icon = AppIcons.CreateIcon(),
             ContextMenu = menu,
             Visibility = Visibility.Visible,
             MenuActivation = PopupActivationMode.RightClick,
@@ -118,19 +100,32 @@ public sealed class TrayController : IDisposable
     public void ShowStartupUi()
     {
         OpenSettings();
-        _tray.ShowBalloonTip(
-            "SteelSeries Auto EQ",
-            "Running in the system tray. Double-click the icon anytime to reopen this window.",
-            BalloonIcon.Info);
+        ShowAppBalloon(
+            "Running in the system tray. Double-click the icon anytime to reopen this window.");
     }
 
     public void BringToFront()
     {
         OpenSettings();
-        _tray.ShowBalloonTip(
-            "SteelSeries Auto EQ",
-            "Already running — brought existing window to front.",
-            BalloonIcon.Info);
+        ShowAppBalloon("Already running — brought existing window to front.");
+    }
+
+    public void Dispose()
+    {
+        _tray.Dispose();
+        _settingsWindow?.Close();
+    }
+
+    private void ShowAppBalloon(string message)
+    {
+        if (_tray.Icon is not null)
+        {
+            _tray.ShowBalloonTip("SteelSeries Auto EQ", message, _tray.Icon, largeIcon: true);
+        }
+        else
+        {
+            _tray.ShowBalloonTip("SteelSeries Auto EQ", message, BalloonIcon.None);
+        }
     }
 
     private void UpdateMenu()
@@ -155,17 +150,31 @@ public sealed class TrayController : IDisposable
             return;
         }
 
-        _settingsWindow = new SettingsWindow(_service, _logger);
+        _settingsWindow = new SettingsWindow(_service);
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow.Show();
         _settingsWindow.Activate();
     }
 
-    public void Dispose()
+    private void OpenLog()
     {
-        _tray.Dispose();
-        _settingsWindow?.Close();
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _logger.LogPath,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open log:{Environment.NewLine}{ex.Message}",
+                "SteelSeries Auto EQ", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
+
+    private static MenuItem DisabledItem(string header) =>
+        new() { Header = header, IsEnabled = false };
 }
 
 internal sealed class RelayCommand(Action execute) : System.Windows.Input.ICommand

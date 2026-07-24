@@ -73,12 +73,6 @@ public sealed class ForegroundMonitor : IDisposable
         _pollTimer = null;
     }
 
-    public ForegroundAppInfo? GetForegroundApp()
-    {
-        var hwnd = GetForegroundWindow();
-        return hwnd == IntPtr.Zero ? null : FromHwnd(hwnd, ReadTitle(hwnd));
-    }
-
     private void OnWinEvent(
         IntPtr hWinEventHook,
         uint eventType,
